@@ -24,18 +24,21 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 def get_data(symbol):
-    url = "https://api.binance.com/api/v3/klines"
+    url = "https://www.okx.com/api/v5/market/candles"
     params = {
-        "symbol": symbol.upper() + "USDT",
-        "interval": "15m",
-        "limit": 100
+        "instId": symbol.upper() + "-USDT",
+        "bar": "15m",
+        "limit": "100"
     }
 
     data = requests.get(url, params=params).json()
 
-    df = pd.DataFrame(data, columns=[
-        "time", "open", "high", "low", "close", "volume",
-        "close_time", "qav", "trades", "tbbav", "tbqav", "ignore"
+    candles = data["data"]
+    candles.reverse()
+
+    df = pd.DataFrame(candles, columns=[
+        "time", "open", "high", "low", "close",
+        "volume", "volCcy", "volCcyQuote", "confirm"
     ])
 
     df["open"] = df["open"].astype(float)
