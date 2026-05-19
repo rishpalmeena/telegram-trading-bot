@@ -1,135 +1,53 @@
 import os
 import requests
-import pandas as pd
-from flask import Flask
-from threading import Thread
-
-web_app = Flask(__name__)
-
-@web_app.route("/")
-def home():
-    return "Bot is running"
-
-def run_web():
-    port = int(os.environ.get("PORT", 10000))
-    web_app.run(host="0.0.0.0", port=port)
-
-Thread(target=run_web).start()
-from ta.momentum import RSIIndicator
-from ta.trend import EMAIndicator
-from ta.volatility import AverageTrueRange
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from flask import Flask, request
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
 
-def get_data(symbol):
-    url = "https://www.okx.com/api/v5/market/candles"
-    params = {
-        "instId": symbol.upper() + "-USDT",
-        "bar": "15m",
-        "limit": "100"
+app = Flask(__name__)
+
+def send_telegram(message):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    data = {
+        "chat_id": CHAT_ID,
+        "text": message
     }
+    requests.post(url, data=data)
 
-    data = requests.get(url, params=params).json()
+@app.route("/")
+def home():
+    return "TradingView Telegram Bot is running"
 
-    candles = data["data"]
-    candles.reverse()
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    data = request.json
 
-    df = pd.DataFrame(candles, columns=[
-        "time", "open", "high", "low", "close",
-        "volume", "volCcy", "volCcyQuote", "confirm"
-    ])
+    symbol = data.get("symbol", "Unknown")
+    signal = data.get("signal", "Signal")
+    entry = data.get("entry", "N/A")
+    sl = data.get("sl", "N/A")
+    target = data.get("target", "N/A")
+    timeframe = data.get("timeframe", "N/A")
 
-    df["open"] = df["open"].astype(float)
-    df["high"] = df["high"].astype(float)
-    df["low"] = df["low"].astype(float)
-    df["close"] = df["close"].astype(float)
+    message = f"""
+🚨 Trading Alert
 
-    return df
-
-def analyze_coin(coin):
-    df = get_data(coin)
-
-    close = df["close"]
-    high = df["high"]
-    low = df["low"]
-
-    df["ema20"] = EMAIndicator(close, window=20).ema_indicator()
-    df["ema50"] = EMAIndicator(close, window=50).ema_indicator()
-    df["rsi"] = RSIIndicator(close, window=14).rsi()
-    df["atr"] = AverageTrueRange(high, low, close, window=14).average_true_range()
-
-    last = df.iloc[-1]
-
-    price = last["close"]
-    ema20 = last["ema20"]
-    ema50 = last["ema50"]
-    rsi = last["rsi"]
-    atr = last["atr"]
-
-    if ema20 > ema50 and rsi > 55:
-        signal = "BUY 🟢"
-        entry = price
-        sl = price - (atr * 1.5)
-        t1 = price + (atr * 2)
-        t2 = price + (atr * 3)
-
-    elif ema20 < ema50 and rsi < 45:
-        signal = "SELL 🔴"
-        entry = price
-        sl = price + (atr * 1.5)
-        t1 = price - (atr * 2)
-        t2 = price - (atr * 3)
-
-    else:
-        return f"""
-⚠️ {coin.upper()} me abhi clear signal nahi hai.
-
-Price: {price:.4f}
-RSI: {rsi:.2f}
-"""
-
-    return f"""
-📊 {coin.upper()}USDT Analysis
-
+Market: {symbol}
 Signal: {signal}
+Timeframe: {timeframe}
 
-Entry: {entry:.4f}
-Stop Loss: {sl:.4f}
+Entry: {entry}
+Stop Loss: {sl}
+Target: {target}
 
-Target 1: {t1:.4f}
-Target 2: {t2:.4f}
-
-RSI: {rsi:.2f}
-
-⚠️ Risk:
-Har trade me sirf 1-2% risk karein.
+⚠️ Risk: 1-2% capital only
 """
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Bot ready hai 🚀\n\nUse:\n/analyze btc\n/analyze eth"
-    )
+    send_telegram(message)
 
-async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Example:\n/analyze btc")
-        return
+    return {"status": "success"}
 
-    coin = context.args[0].upper()
-
-    try:
-        result = analyze_coin(coin)
-        await update.message.reply_text(result)
-    except:
-        await update.message.reply_text(
-            "Error: Coin name galat hai ya data nahi mil raha.\nExample: /analyze btc"
-        )
-
-app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("analyze", analyze))
-
-app.run_polling()
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
