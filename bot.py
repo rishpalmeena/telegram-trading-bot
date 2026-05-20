@@ -111,6 +111,20 @@ def analyze_coin(coin):
     }
 
 def format_alert(result):
+
+    risk_percent = abs(
+        ((result['entry'] - result['sl']) / result['entry']) * 100
+    )
+
+    if risk_percent <= 1.5:
+        risk_level = "Low Risk ✅"
+
+    elif risk_percent <= 3:
+        risk_level = "Medium Risk ⚠️"
+
+    else:
+        risk_level = "High Risk 🔴"
+
     return f"""
 🚨 Auto Trading Alert
 
@@ -118,6 +132,7 @@ Coin: {result['coin']}USDT
 Signal: {result['signal']}
 
 Entry: {result['entry']:.4f}
+
 Stop Loss: {result['sl']:.4f}
 
 Target 1: {result['t1']:.4f}
@@ -125,8 +140,11 @@ Target 2: {result['t2']:.4f}
 
 RSI: {result['rsi']:.2f}
 
-⚠️ Risk:
-Har trade me sirf 1-2% capital risk karein.
+Risk: {risk_percent:.2f}%
+Risk Level: {risk_level}
+
+⚠️ Suggestion:
+Har trade me capital ka sirf 1-2% risk karein.
 """
 
 def send_telegram(message):
