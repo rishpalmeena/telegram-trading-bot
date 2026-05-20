@@ -27,7 +27,7 @@ WATCHLIST = [
     "FIL","INJ","ICP","SEI","TIA","UNI","AAVE",
     "RUNE","STX","POL","RENDER","FET","GRT","LDO",
     "ENS","SNX","CRV","CAKE","COMP","DYDX","JUP",
-    "ENA","W","STRK","ZRO","NOT","BONK","FLOKI"
+    "ENA","W","STRK","ZRO","NOT","BONK","FLOKI","USDT"
 ]
 
 SYMBOL_MAP = {
