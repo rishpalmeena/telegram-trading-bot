@@ -301,7 +301,7 @@ Confirmations:
 
 Note:
 Ye fresh live scan ke baad signal hai.
-99% guarantee possible nahi hoti, lekin advanced filters fake signals kam karte hain.
+🙏Trad Your Risk, lekin advanced filters fake signals kam karte hain.
 """
 
 def format_no_trade(result):
