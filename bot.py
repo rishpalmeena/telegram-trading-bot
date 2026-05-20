@@ -181,11 +181,11 @@ Used Symbol: {result['used_symbol']}USDT
 
 Signal: {result['signal']}
 
-Entry: {result['entry']:.4f}
-Stop Loss: {result['sl']:.4f}
+Entry: {result['entry']:.8f}
+Stop Loss: {result['sl']:.8f}
 
-Target 1: {result['t1']:.4f}
-Target 2: {result['t2']:.4f}
+Target 1: {result['t1']:.8f}
+Target 2: {result['t2']:.8f}
 
 RSI: {result['rsi']:.2f}
 
