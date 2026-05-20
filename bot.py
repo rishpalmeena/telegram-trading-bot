@@ -6,9 +6,11 @@ from threading import Thread
 from flask import Flask
 from datetime import datetime
 import pytz
+
 from ta.momentum import RSIIndicator
-from ta.trend import EMAIndicator
+from ta.trend import EMAIndicator, MACD
 from ta.volatility import AverageTrueRange
+
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
@@ -19,6 +21,7 @@ SCAN_INTERVAL = 900
 COOLDOWN_SECONDS = 900
 MAX_AUTO_RISK_PERCENT = 1.5
 TOP_ALERT_LIMIT = 5
+MIN_CONFIDENCE = 70
 
 WATCHLIST = [
     "BTC","ETH","BNB","SOL","XRP","ADA","DOGE","AVAX",
@@ -27,7 +30,7 @@ WATCHLIST = [
     "FIL","INJ","ICP","SEI","TIA","UNI","AAVE",
     "RUNE","STX","POL","RENDER","FET","GRT","LDO",
     "ENS","SNX","CRV","CAKE","COMP","DYDX","JUP",
-    "ENA","W","STRK","ZRO","NOT","BONK","FLOKI","USDT"
+    "ENA","W","STRK","ZRO","NOT","BONK","FLOKI"
 ]
 
 SYMBOL_MAP = {
@@ -46,7 +49,7 @@ web_app = Flask(__name__)
 
 @web_app.route("/")
 def home():
-    return "Auto scanner bot is running"
+    return "Advanced scanner bot is running"
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -59,20 +62,15 @@ def get_india_time():
 def possible_symbols(symbol):
     return SYMBOL_MAP.get(symbol.upper(), [symbol.upper()])
 
-def get_binance_data(symbol):
+def get_binance_data(symbol, interval="15m"):
     url = "https://api.binance.com/api/v3/klines"
-
     params = {
         "symbol": symbol.upper() + "USDT",
-        "interval": "15m",
-        "limit": 120
+        "interval": interval,
+        "limit": 150
     }
 
-    data = requests.get(
-        url,
-        params=params,
-        timeout=10
-    ).json()
+    data = requests.get(url, params=params, timeout=10).json()
 
     if not isinstance(data, list):
         raise Exception("Binance data not found")
@@ -82,27 +80,22 @@ def get_binance_data(symbol):
         "close_time","qav","trades","tbbav","tbqav","ignore"
     ])
 
-    df["open"] = df["open"].astype(float)
-    df["high"] = df["high"].astype(float)
-    df["low"] = df["low"].astype(float)
-    df["close"] = df["close"].astype(float)
+    for col in ["open", "high", "low", "close", "volume"]:
+        df[col] = df[col].astype(float)
 
     return df, "Binance", symbol.upper()
 
-def get_okx_data(symbol):
-    url = "https://www.okx.com/api/v5/market/candles"
+def get_okx_data(symbol, interval="15m"):
+    okx_interval = interval
 
+    url = "https://www.okx.com/api/v5/market/candles"
     params = {
         "instId": symbol.upper() + "-USDT",
-        "bar": "15m",
-        "limit": "120"
+        "bar": okx_interval,
+        "limit": "150"
     }
 
-    data = requests.get(
-        url,
-        params=params,
-        timeout=10
-    ).json()
+    data = requests.get(url, params=params, timeout=10).json()
 
     if "data" not in data or not data["data"]:
         raise Exception("OKX data not found")
@@ -115,55 +108,121 @@ def get_okx_data(symbol):
         "volume","volCcy","volCcyQuote","confirm"
     ])
 
-    df["open"] = df["open"].astype(float)
-    df["high"] = df["high"].astype(float)
-    df["low"] = df["low"].astype(float)
-    df["close"] = df["close"].astype(float)
+    for col in ["open", "high", "low", "close", "volume"]:
+        df[col] = df[col].astype(float)
 
     return df, "OKX", symbol.upper()
 
-def get_data(symbol):
+def get_data(symbol, interval="15m"):
     for sym in possible_symbols(symbol):
         try:
-            return get_binance_data(sym)
+            return get_binance_data(sym, interval)
         except Exception:
             try:
-                return get_okx_data(sym)
+                return get_okx_data(sym, interval)
             except Exception:
                 continue
 
     raise Exception("No live exchange data found")
 
-def analyze_coin(coin):
-    scan_time = get_india_time()
-
-    df, source, used_symbol = get_data(coin)
-
+def add_indicators(df):
     close = df["close"]
     high = df["high"]
     low = df["low"]
+    volume = df["volume"]
 
     df["ema20"] = EMAIndicator(close, window=20).ema_indicator()
     df["ema50"] = EMAIndicator(close, window=50).ema_indicator()
-    df["rsi"] = RSIIndicator(close, window=14).rsi()
-    df["atr"] = AverageTrueRange(high, low, close, window=14).average_true_range()
+    df["ema200"] = EMAIndicator(close, window=200 if len(df) >= 200 else 100).ema_indicator()
 
-    last = df.iloc[-1]
+    df["rsi"] = RSIIndicator(close, window=14).rsi()
+
+    macd = MACD(close)
+    df["macd"] = macd.macd()
+    df["macd_signal"] = macd.macd_signal()
+    df["macd_hist"] = macd.macd_diff()
+
+    df["atr"] = AverageTrueRange(high, low, close, window=14).average_true_range()
+    df["volume_avg"] = volume.rolling(20).mean()
+
+    return df
+
+def analyze_coin(coin):
+    scan_time = get_india_time()
+
+    df15, source, used_symbol = get_data(coin, "15m")
+    df1h, _, _ = get_data(coin, "1h")
+
+    df15 = add_indicators(df15)
+    df1h = add_indicators(df1h)
+
+    last = df15.iloc[-1]
+    prev = df15.iloc[-2]
+    htf = df1h.iloc[-1]
 
     price = float(last["close"])
     ema20 = float(last["ema20"])
     ema50 = float(last["ema50"])
     rsi = float(last["rsi"])
     atr = float(last["atr"])
+    volume = float(last["volume"])
+    volume_avg = float(last["volume_avg"])
+    macd_hist = float(last["macd_hist"])
 
-    if ema20 > ema50 and rsi > 55:
+    htf_ema20 = float(htf["ema20"])
+    htf_ema50 = float(htf["ema50"])
+
+    confidence = 0
+    reasons = []
+
+    buy_trend = ema20 > ema50
+    sell_trend = ema20 < ema50
+
+    buy_htf = htf_ema20 > htf_ema50
+    sell_htf = htf_ema20 < htf_ema50
+
+    buy_rsi = 55 <= rsi <= 72
+    sell_rsi = 28 <= rsi <= 45
+
+    buy_macd = macd_hist > 0
+    sell_macd = macd_hist < 0
+
+    volume_ok = volume > volume_avg
+
+    if buy_trend:
+        confidence += 20
+        reasons.append("15m trend bullish")
+    if sell_trend:
+        confidence += 20
+        reasons.append("15m trend bearish")
+
+    if buy_htf:
+        confidence += 25
+        reasons.append("1h trend bullish")
+    if sell_htf:
+        confidence += 25
+        reasons.append("1h trend bearish")
+
+    if buy_rsi or sell_rsi:
+        confidence += 20
+        reasons.append("RSI momentum valid")
+
+    if buy_macd or sell_macd:
+        confidence += 20
+        reasons.append("MACD confirmation")
+
+    if volume_ok:
+        confidence += 15
+        reasons.append("Volume above average")
+
+    if buy_trend and buy_htf and buy_rsi and buy_macd and volume_ok:
         signal = "BUY 🟢"
         entry = price
         sl = price - (atr * 1.5)
         t1 = price + (atr * 2)
         t2 = price + (atr * 3)
 
-    elif ema20 < ema50 and rsi < 45:
+    elif sell_trend and sell_htf and sell_rsi and sell_macd and volume_ok:
         signal = "SELL 🔴"
         entry = price
         sl = price + (atr * 1.5)
@@ -179,7 +238,9 @@ def analyze_coin(coin):
             "signal": "NO TRADE",
             "current_price": price,
             "rsi": rsi,
-            "reason": "Clear BUY/SELL condition match nahi hui."
+            "confidence": confidence,
+            "reason": "Advanced filters match nahi hue.",
+            "checks": ", ".join(reasons) if reasons else "No strong confirmation"
         }
 
     risk_percent = abs(((entry - sl) / entry) * 100)
@@ -204,12 +265,14 @@ def analyze_coin(coin):
         "t2": t2,
         "rsi": rsi,
         "risk_percent": risk_percent,
-        "risk_level": risk_level
+        "risk_level": risk_level,
+        "confidence": confidence,
+        "checks": ", ".join(reasons)
     }
 
 def format_signal_alert(result):
     return f"""
-🚨 Fresh Trading Signal
+🚨 Advanced Fresh Trading Signal
 
 Scan Time: {result['scan_time']}
 
@@ -218,6 +281,7 @@ Data Source: {result['source']}
 Used Symbol: {result['used_symbol']}USDT
 
 Signal: {result['signal']}
+Confidence Score: {result['confidence']}%
 
 Current Price: {result['current_price']:.8f}
 
@@ -232,14 +296,17 @@ RSI: {result['rsi']:.2f}
 Risk: {result['risk_percent']:.2f}%
 Risk Level: {result['risk_level']}
 
+Confirmations:
+{result['checks']}
+
 Note:
 Ye fresh live scan ke baad signal hai.
-trade your risk.
+99% guarantee possible nahi hoti, lekin advanced filters fake signals kam karte hain.
 """
 
 def format_no_trade(result):
     return f"""
-📊 Fresh Analysis
+📊 Advanced Fresh Analysis
 
 Scan Time: {result['scan_time']}
 
@@ -249,9 +316,13 @@ Used Symbol: {result['used_symbol']}USDT
 
 Current Price: {result['current_price']:.8f}
 RSI: {result['rsi']:.2f}
+Confidence Score: {result['confidence']}%
 
 Signal: NO TRADE ❌
 Reason: {result['reason']}
+
+Checks:
+{result['checks']}
 
 Note:
 Ye result fresh live scan ke baad hai.
@@ -289,7 +360,11 @@ def scanner_loop():
                             continue
 
                         if result["risk_percent"] > MAX_AUTO_RISK_PERCENT:
-                            print(f"{coin}: Signal found but risk not low")
+                            print(f"{coin}: Risk not low")
+                            continue
+
+                        if result["confidence"] < MIN_CONFIDENCE:
+                            print(f"{coin}: Confidence low")
                             continue
 
                         last_time = LAST_ALERT_TIME.get(coin, 0)
@@ -305,7 +380,7 @@ def scanner_loop():
 
                 valid_signals = sorted(
                     valid_signals,
-                    key=lambda x: x["risk_percent"]
+                    key=lambda x: (-x["confidence"], x["risk_percent"])
                 )
 
                 top_signals = valid_signals[:TOP_ALERT_LIMIT]
@@ -313,7 +388,7 @@ def scanner_loop():
                 for signal in top_signals:
                     send_telegram(format_signal_alert(signal))
                     LAST_ALERT_TIME[signal["coin"]] = now
-                    print(f"Top alert sent for {signal['coin']}")
+                    print(f"Top advanced alert sent for {signal['coin']}")
 
             time.sleep(SCAN_INTERVAL)
 
@@ -368,8 +443,9 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"Auto alerts: {status_text}\n"
         f"Scan interval: 15 minutes\n"
-        f"Low Risk signals only\n"
         f"Top alerts per scan: {TOP_ALERT_LIMIT}\n"
+        f"Low Risk only: max {MAX_AUTO_RISK_PERCENT}%\n"
+        f"Minimum confidence: {MIN_CONFIDENCE}%\n"
         f"Timezone: Asia/Kolkata IST"
     )
 
