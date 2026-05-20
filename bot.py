@@ -1,3 +1,5 @@
+from flask import Flask
+from threading import Thread
 import os
 import json
 import time
@@ -13,6 +15,14 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+web = Flask(__name__)
+
+@web.route("/")
+def home():
+    return "Bot Running"
+
+def run_web():
+    web.run(host="0.0.0.0", port=10000)
 CHAT_ID = os.getenv("CHAT_ID")
 
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
@@ -388,4 +398,7 @@ app.add_handler(CommandHandler("symbols", symbols))
 app.add_handler(CommandHandler("myid", myid))
 
 if __name__ == "__main__":
-    app.run_polling(close_loop=False)
+
+    Thread(target=run_web).start()
+
+    app.run_polling()
