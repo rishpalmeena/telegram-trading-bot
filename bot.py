@@ -234,7 +234,7 @@ Risk Level: {result['risk_level']}
 
 Note:
 Ye fresh live scan ke baad signal hai.
-99% guarantee possible nahi hoti.
+trade your risk.
 """
 
 def format_no_trade(result):
