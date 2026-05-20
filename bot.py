@@ -390,7 +390,36 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/symbols\n"
         "/myid"
     )
+    async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
+    if len(context.args) == 0:
+        await update.message.reply_text(
+            "Usage:\n/analyze btc"
+        )
+        return
+
+    coin = context.args[0].upper()
+
+    if not coin.endswith("USDT"):
+        coin += "USDT"
+
+    if coin not in CANDLES or len(CANDLES[coin]) < 50:
+        await update.message.reply_text(
+            f"{coin} data not ready yet."
+        )
+        return
+
+    result = analyze_symbol(coin)
+
+    if not result:
+        await update.message.reply_text(
+            f"{coin} currently no high probability setup found."
+        )
+        return
+
+    await update.message.reply_text(
+        format_alert(result)
+    )
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_text = "ON ✅" if ALERTS_ON else "OFF 🛑"
 
@@ -428,7 +457,7 @@ app.add_handler(CommandHandler("startalerts", startalerts))
 app.add_handler(CommandHandler("stopalerts", stopalerts))
 app.add_handler(CommandHandler("symbols", symbols))
 app.add_handler(CommandHandler("myid", myid))
-
+app.add_handler(CommandHandler("analyze", analyze))
 async def run_bot():
     await app.initialize()
     await app.start()
