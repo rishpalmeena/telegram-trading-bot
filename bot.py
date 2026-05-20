@@ -383,12 +383,7 @@ async def symbols(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Your chat id: {update.effective_chat.id}")
 
-
-async def post_init(app):
-    app.create_task(websocket_loop(app))
-
-
-app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
+app = ApplicationBuilder().token(BOT_TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("status", status))
@@ -401,4 +396,13 @@ if __name__ == "__main__":
 
     Thread(target=run_web).start()
 
-    app.run_polling()
+    async def run_bot():
+        await app.initialize()
+        await app.start()
+        await app.updater.start_polling()
+        asyncio.create_task(websocket_loop(app))
+
+        while True:
+            await asyncio.sleep(3600)
+
+    asyncio.run(run_bot())
