@@ -4,6 +4,7 @@ import requests
 import pandas as pd
 from threading import Thread
 from flask import Flask
+from datetime import datetime
 from ta.momentum import RSIIndicator
 from ta.trend import EMAIndicator
 from ta.volatility import AverageTrueRange
@@ -12,6 +13,10 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+
+SCAN_INTERVAL = 900  # 15 minutes
+COOLDOWN_SECONDS = 900  # same coin repeat alert gap
+MAX_AUTO_RISK_PERCENT = 1.5  # only Low Risk auto alerts
 
 WATCHLIST = [
     "BTC","ETH","BNB","SOL","XRP","ADA","DOGE","AVAX",
@@ -33,7 +38,7 @@ SYMBOL_MAP = {
 }
 
 ALERTS_ON = True
-LAST_ALERT = {}
+LAST_ALERT_TIME = {}
 
 web_app = Flask(__name__)
 
@@ -53,7 +58,7 @@ def get_binance_data(symbol):
     params = {
         "symbol": symbol.upper() + "USDT",
         "interval": "15m",
-        "limit": 100
+        "limit": 120
     }
 
     data = requests.get(url, params=params, timeout=10).json()
@@ -78,7 +83,7 @@ def get_okx_data(symbol):
     params = {
         "instId": symbol.upper() + "-USDT",
         "bar": "15m",
-        "limit": "100"
+        "limit": "120"
     }
 
     data = requests.get(url, params=params, timeout=10).json()
@@ -111,9 +116,11 @@ def get_data(symbol):
             except Exception:
                 continue
 
-    raise Exception("No exchange data found")
+    raise Exception("No live exchange data found")
 
 def analyze_coin(coin):
+    scan_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
     df, source, used_symbol = get_data(coin)
 
     close = df["close"]
@@ -148,22 +155,18 @@ def analyze_coin(coin):
         t2 = price - (atr * 3)
 
     else:
-        return None
+        return {
+            "coin": coin.upper(),
+            "used_symbol": used_symbol,
+            "source": source,
+            "scan_time": scan_time,
+            "signal": "NO TRADE",
+            "price": price,
+            "rsi": rsi,
+            "reason": "Clear BUY/SELL condition match nahi hui."
+        }
 
-    return {
-        "coin": coin.upper(),
-        "used_symbol": used_symbol,
-        "source": source,
-        "signal": signal,
-        "entry": entry,
-        "sl": sl,
-        "t1": t1,
-        "t2": t2,
-        "rsi": rsi
-    }
-
-def format_alert(result):
-    risk_percent = abs(((result["entry"] - result["sl"]) / result["entry"]) * 100)
+    risk_percent = abs(((entry - sl) / entry) * 100)
 
     if risk_percent <= 1.5:
         risk_level = "Low Risk ✅"
@@ -172,9 +175,26 @@ def format_alert(result):
     else:
         risk_level = "High Risk 🔴"
 
-    return f"""
-🚨 Auto Trading Alert
+    return {
+        "coin": coin.upper(),
+        "used_symbol": used_symbol,
+        "source": source,
+        "scan_time": scan_time,
+        "signal": signal,
+        "entry": entry,
+        "sl": sl,
+        "t1": t1,
+        "t2": t2,
+        "rsi": rsi,
+        "risk_percent": risk_percent,
+        "risk_level": risk_level
+    }
 
+def format_signal_alert(result):
+    return f"""
+🚨 Fresh Trading Signal
+
+Scan Time: {result['scan_time']}
 Coin: {result['coin']}USDT
 Data Source: {result['source']}
 Used Symbol: {result['used_symbol']}USDT
@@ -189,15 +209,36 @@ Target 2: {result['t2']:.8f}
 
 RSI: {result['rsi']:.2f}
 
-Risk: {risk_percent:.2f}%
-Risk Level: {risk_level}
+Risk: {result['risk_percent']:.2f}%
+Risk Level: {result['risk_level']}
 
-⚠️ Suggestion:
-Har trade me capital ka sirf 1-2% risk karein.
+Note:
+Ye fresh live scan ke baad signal hai.
+99% guarantee possible nahi hoti. Testnet/paper trading me verify karein.
+"""
+
+def format_no_trade(result):
+    return f"""
+📊 Fresh Analysis
+
+Scan Time: {result['scan_time']}
+Coin: {result['coin']}USDT
+Data Source: {result['source']}
+Used Symbol: {result['used_symbol']}USDT
+
+Current Price: {result['price']:.8f}
+RSI: {result['rsi']:.2f}
+
+Signal: NO TRADE ❌
+Reason: {result['reason']}
+
+Note:
+Ye result fresh live scan ke baad hai.
 """
 
 def send_telegram(message):
     if not CHAT_ID:
+        print("CHAT_ID missing")
         return
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -205,6 +246,7 @@ def send_telegram(message):
         "chat_id": CHAT_ID,
         "text": message
     }
+
     requests.post(url, data=data, timeout=10)
 
 def scanner_loop():
@@ -213,37 +255,38 @@ def scanner_loop():
     while True:
         try:
             if ALERTS_ON:
-                send_telegram("🔍 Auto scan started...")
-
-                found_signal = False
+                now = time.time()
 
                 for coin in WATCHLIST:
                     try:
                         result = analyze_coin(coin)
 
-                        if result:
-                            found_signal = True
-                            key = result["coin"] + "_" + result["signal"]
+                        if result["signal"] == "NO TRADE":
+                            print(f"{coin}: No trade after fresh scan")
+                            continue
 
-                            if LAST_ALERT.get(result["coin"]) != key:
-                                send_telegram(format_alert(result))
-                                LAST_ALERT[result["coin"]] = key
-                        else:
-                            print(f"{coin}: No clear signal")
+                        risk_percent = result["risk_percent"]
+
+                        if risk_percent > MAX_AUTO_RISK_PERCENT:
+                            print(f"{coin}: Signal found but risk not low")
+                            continue
+
+                        last_time = LAST_ALERT_TIME.get(coin, 0)
+
+                        if now - last_time < COOLDOWN_SECONDS:
+                            print(f"{coin}: Cooldown active")
+                            continue
+
+                        send_telegram(format_signal_alert(result))
+                        LAST_ALERT_TIME[coin] = now
 
                     except Exception as e:
                         print(f"{coin} scan error:", e)
 
-                if not found_signal:
-                    send_telegram(
-                        "📊 Auto Scan Complete\n\n"
-                        "Abhi kisi coin me clear BUY/SELL signal nahi mila."
-                    )
-
-            time.sleep(900)
+            time.sleep(SCAN_INTERVAL)
 
         except Exception as e:
-            print("Scanner error:", e)
+            print("Scanner loop error:", e)
             time.sleep(60)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -267,22 +310,20 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         result = analyze_coin(coin)
 
-        if result:
-            await update.message.reply_text(format_alert(result))
+        if result["signal"] == "NO TRADE":
+            await update.message.reply_text(format_no_trade(result))
         else:
-            await update.message.reply_text(
-                f"⚠️ {coin} me abhi clear BUY/SELL signal nahi hai."
-            )
+            await update.message.reply_text(format_signal_alert(result))
 
     except Exception:
         await update.message.reply_text(
-            f"❌ {coin} ka data Binance/OKX dono par nahi mila."
+            f"❌ {coin} ka fresh data Binance/OKX dono par nahi mila."
         )
 
 async def startalerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global ALERTS_ON
     ALERTS_ON = True
-    await update.message.reply_text("✅ Auto alerts ON ho gaye.")
+    await update.message.reply_text("✅ Auto alerts ON ho gaye. Bot har 15 min watchlist scan karega.")
 
 async def stopalerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global ALERTS_ON
@@ -291,7 +332,11 @@ async def stopalerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_text = "ON ✅" if ALERTS_ON else "OFF 🛑"
-    await update.message.reply_text(f"Auto alerts: {status_text}")
+    await update.message.reply_text(
+        f"Auto alerts: {status_text}\n"
+        f"Scan interval: 15 minutes\n"
+        f"Auto alert risk filter: Low Risk only"
+    )
 
 async def watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
