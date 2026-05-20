@@ -14,45 +14,22 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 WATCHLIST = [
-    "BTC",
-    "ETH",
-    "BNB",
-    "SOL",
-    "XRP",
-    "ADA",
-    "DOGE",
-    "AVAX",
-    "LINK",
-    "DOT",
-    "TRX",
-    "TON",
-    "LTC",
-    "SHIB",
-    "PEPE",
-    "ARB",
-    "OP",
-    "APT",
-    "SUI",
-    "NEAR",
-    "ATOM",
-    "HBAR",
-    "FIL",
-    "INJ",
-    "ICP",
-    "SEI",
-    "TIA",
-    "UNI",
-    "AAVE",
-    "RUNE",
-    "FTM",
-    "STX",
-    "MATIC",
-    "RNDR"
+    "BTC","ETH","BNB","SOL","XRP","ADA","DOGE","AVAX",
+    "LINK","DOT","TRX","TON","LTC","SHIB","PEPE",
+    "ARB","OP","APT","SUI","NEAR","ATOM","HBAR",
+    "FIL","INJ","ICP","SEI","TIA","UNI","AAVE",
+    "RUNE","STX","POL","RENDER","FET","GRT","LDO",
+    "ENS","SNX","CRV","CAKE","COMP","DYDX","JUP",
+    "ENA","W","STRK","ZRO","NOT","BONK","FLOKI"
 ]
 
 SYMBOL_MAP = {
     "MATIC": ["POL", "MATIC"],
-    "RNDR": ["RENDER", "RNDR"]
+    "POL": ["POL", "MATIC"],
+    "RNDR": ["RENDER", "RNDR"],
+    "RENDER": ["RENDER", "RNDR"],
+    "FET": ["FET"],
+    "ASI": ["FET"]
 }
 
 ALERTS_ON = True
@@ -236,11 +213,16 @@ def scanner_loop():
     while True:
         try:
             if ALERTS_ON:
+                send_telegram("🔍 Auto scan started...")
+
+                found_signal = False
+
                 for coin in WATCHLIST:
                     try:
                         result = analyze_coin(coin)
 
                         if result:
+                            found_signal = True
                             key = result["coin"] + "_" + result["signal"]
 
                             if LAST_ALERT.get(result["coin"]) != key:
@@ -251,6 +233,12 @@ def scanner_loop():
 
                     except Exception as e:
                         print(f"{coin} scan error:", e)
+
+                if not found_signal:
+                    send_telegram(
+                        "📊 Auto Scan Complete\n\n"
+                        "Abhi kisi coin me clear BUY/SELL signal nahi mila."
+                    )
 
             time.sleep(900)
 
