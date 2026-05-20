@@ -18,6 +18,7 @@ CHAT_ID = os.getenv("CHAT_ID")
 SCAN_INTERVAL = 900
 COOLDOWN_SECONDS = 900
 MAX_AUTO_RISK_PERCENT = 1.5
+TOP_ALERT_LIMIT = 5
 
 WATCHLIST = [
     "BTC","ETH","BNB","SOL","XRP","ADA","DOGE","AVAX",
@@ -60,13 +61,18 @@ def possible_symbols(symbol):
 
 def get_binance_data(symbol):
     url = "https://api.binance.com/api/v3/klines"
+
     params = {
         "symbol": symbol.upper() + "USDT",
         "interval": "15m",
         "limit": 120
     }
 
-    data = requests.get(url, params=params, timeout=10).json()
+    data = requests.get(
+        url,
+        params=params,
+        timeout=10
+    ).json()
 
     if not isinstance(data, list):
         raise Exception("Binance data not found")
@@ -85,13 +91,18 @@ def get_binance_data(symbol):
 
 def get_okx_data(symbol):
     url = "https://www.okx.com/api/v5/market/candles"
+
     params = {
         "instId": symbol.upper() + "-USDT",
         "bar": "15m",
         "limit": "120"
     }
 
-    data = requests.get(url, params=params, timeout=10).json()
+    data = requests.get(
+        url,
+        params=params,
+        timeout=10
+    ).json()
 
     if "data" not in data or not data["data"]:
         raise Exception("OKX data not found")
@@ -223,7 +234,7 @@ Risk Level: {result['risk_level']}
 
 Note:
 Ye fresh live scan ke baad signal hai.
-trade yours risk.
+99% guarantee possible nahi hoti.
 """
 
 def format_no_trade(result):
@@ -267,6 +278,7 @@ def scanner_loop():
         try:
             if ALERTS_ON:
                 now = time.time()
+                valid_signals = []
 
                 for coin in WATCHLIST:
                     try:
@@ -276,9 +288,7 @@ def scanner_loop():
                             print(f"{coin}: No trade after fresh scan")
                             continue
 
-                        risk_percent = result["risk_percent"]
-
-                        if risk_percent > MAX_AUTO_RISK_PERCENT:
+                        if result["risk_percent"] > MAX_AUTO_RISK_PERCENT:
                             print(f"{coin}: Signal found but risk not low")
                             continue
 
@@ -288,11 +298,22 @@ def scanner_loop():
                             print(f"{coin}: Cooldown active")
                             continue
 
-                        send_telegram(format_signal_alert(result))
-                        LAST_ALERT_TIME[coin] = now
+                        valid_signals.append(result)
 
                     except Exception as e:
                         print(f"{coin} scan error:", e)
+
+                valid_signals = sorted(
+                    valid_signals,
+                    key=lambda x: x["risk_percent"]
+                )
+
+                top_signals = valid_signals[:TOP_ALERT_LIMIT]
+
+                for signal in top_signals:
+                    send_telegram(format_signal_alert(signal))
+                    LAST_ALERT_TIME[signal["coin"]] = now
+                    print(f"Top alert sent for {signal['coin']}")
 
             time.sleep(SCAN_INTERVAL)
 
@@ -348,6 +369,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Auto alerts: {status_text}\n"
         f"Scan interval: 15 minutes\n"
         f"Low Risk signals only\n"
+        f"Top alerts per scan: {TOP_ALERT_LIMIT}\n"
         f"Timezone: Asia/Kolkata IST"
     )
 
