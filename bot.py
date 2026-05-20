@@ -63,17 +63,108 @@ def possible_symbols(symbol):
     return SYMBOL_MAP.get(symbol.upper(), [symbol.upper()])
 
 def get_binance_data(symbol, interval="15m"):
+
     url = "https://api.binance.com/api/v3/klines"
+
     params = {
         "symbol": symbol.upper() + "USDT",
         "interval": interval,
         "limit": 150
     }
 
-    data = requests.get(url, params=params, timeout=10).json()
+    response = requests.get(
+        url,
+        params=params,
+        timeout=15
+    )
+
+    if response.status_code != 200:
+        raise Exception("Binance API error")
+
+    data = response.json()
 
     if not isinstance(data, list):
-        raise Exception("Binance data not found")
+        raise Exception("Binance invalid data")
+
+    df = pd.DataFrame(data, columns=[
+        "time","open","high","low","close","volume",
+        "close_time","qav","trades","tbbav","tbqav","ignore"
+    ])
+
+    for col in ["open","high","low","close","volume"]:
+        df[col] = df[col].astype(float)
+
+    return df, "Binance", symbol.upper()
+
+
+def get_okx_data(symbol, interval="15m"):
+
+    okx_map = {
+        "15m": "15m",
+        "1h": "1H"
+    }
+
+    url = "https://www.okx.com/api/v5/market/candles"
+
+    params = {
+        "instId": symbol.upper() + "-USDT",
+        "bar": okx_map.get(interval, "15m"),
+        "limit": "150"
+    }
+
+    response = requests.get(
+        url,
+        params=params,
+        timeout=15
+    )
+
+    if response.status_code != 200:
+        raise Exception("OKX API error")
+
+    data = response.json()
+
+    if "data" not in data:
+        raise Exception("OKX invalid data")
+
+    candles = data["data"]
+
+    if not candles:
+        raise Exception("OKX empty data")
+
+    candles.reverse()
+
+    df = pd.DataFrame(candles, columns=[
+        "time","open","high","low","close",
+        "volume","volCcy","volCcyQuote","confirm"
+    ])
+
+    for col in ["open","high","low","close","volume"]:
+        df[col] = df[col].astype(float)
+
+    return df, "OKX", symbol.upper()
+
+
+def get_data(symbol, interval="15m"):
+
+    for sym in possible_symbols(symbol):
+
+        try:
+            return get_binance_data(sym, interval)
+
+        except Exception as e1:
+
+            print(f"Binance failed {sym}: {e1}")
+
+            try:
+                return get_okx_data(sym, interval)
+
+            except Exception as e2:
+
+                print(f"OKX failed {sym}: {e2}")
+
+                continue
+
+    raise Exception("No live exchange data found")
 
     df = pd.DataFrame(data, columns=[
         "time","open","high","low","close","volume",
