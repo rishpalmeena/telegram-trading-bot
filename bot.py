@@ -40,7 +40,8 @@ def home():
     return "WebSocket Candlestick Bot Running"
 
 def run_web():
-    web.run(host="0.0.0.0", port=10000)
+    port = int(os.environ.get("PORT", 10000))
+    web.run(host="0.0.0.0", port=port)
 
 def india_time():
     tz = pytz.timezone("Asia/Kolkata")
@@ -86,47 +87,36 @@ def detect_candlestick_pattern(df):
     b2, r2, uw2, lw2, bull2, bear2 = candle_parts(c2)
     b3, r3, uw3, lw3, bull3, bear3 = candle_parts(c3)
 
-    # Doji
     if b1 / r1 <= 0.12:
-        return "Doji", "Market indecision, trade avoid/confirmation wait", 5
+        return "Doji", "Market indecision, confirmation wait", 5
 
-    # Hammer
     if lw1 >= b1 * 2.2 and uw1 <= b1 * 0.7 and bull1:
         return "Hammer", "Bullish rejection from lower level", 20
 
-    # Shooting Star
     if uw1 >= b1 * 2.2 and lw1 <= b1 * 0.7 and bear1:
         return "Shooting Star", "Bearish rejection from upper level", 20
 
-    # Bullish Engulfing
     if bear2 and bull1 and c1["close"] > c2["open"] and c1["open"] < c2["close"]:
         return "Bullish Engulfing", "Strong buyer takeover", 25
 
-    # Bearish Engulfing
     if bull2 and bear1 and c1["open"] > c2["close"] and c1["close"] < c2["open"]:
         return "Bearish Engulfing", "Strong seller takeover", 25
 
-    # Morning Star
     if bear3 and b2 / r2 <= 0.35 and bull1 and c1["close"] > ((c3["open"] + c3["close"]) / 2):
         return "Morning Star", "Potential bullish reversal", 25
 
-    # Evening Star
     if bull3 and b2 / r2 <= 0.35 and bear1 and c1["close"] < ((c3["open"] + c3["close"]) / 2):
         return "Evening Star", "Potential bearish reversal", 25
 
-    # Piercing Pattern
     if bear2 and bull1 and c1["open"] < c2["close"] and c1["close"] > ((c2["open"] + c2["close"]) / 2):
         return "Piercing Pattern", "Bullish recovery after sell pressure", 20
 
-    # Dark Cloud Cover
     if bull2 and bear1 and c1["open"] > c2["close"] and c1["close"] < ((c2["open"] + c2["close"]) / 2):
         return "Dark Cloud Cover", "Bearish rejection after buying pressure", 20
 
-    # Marubozu Bullish
     if bull1 and uw1 / r1 <= 0.08 and lw1 / r1 <= 0.08 and b1 / r1 >= 0.8:
         return "Bullish Marubozu", "Strong bullish candle", 20
 
-    # Marubozu Bearish
     if bear1 and uw1 / r1 <= 0.08 and lw1 / r1 <= 0.08 and b1 / r1 >= 0.8:
         return "Bearish Marubozu", "Strong bearish candle", 20
 
@@ -198,7 +188,6 @@ def analyze_symbol(symbol):
         "Bearish Marubozu"
     ]
 
-    # BUY setup
     if price > swing_high and trend_buy and pattern in bullish_patterns:
         confidence += 30
         reasons.append("Breakout above resistance")
@@ -228,7 +217,6 @@ def analyze_symbol(symbol):
             risk = price - sl
             target = price + risk * RISK_REWARD
 
-    # SELL setup
     elif price < swing_low and trend_sell and pattern in bearish_patterns:
         confidence += 30
         reasons.append("Breakdown below support")
@@ -326,7 +314,6 @@ async def websocket_loop(app):
                     payload = json.loads(message)
                     k = payload["data"]["k"]
 
-                    # Only closed candle
                     if not k["x"]:
                         continue
 
@@ -388,38 +375,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/startalerts\n"
         "/stopalerts\n"
         "/symbols\n"
+        "/analyze btc\n"
         "/myid"
     )
-    async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    if len(context.args) == 0:
-        await update.message.reply_text(
-            "Usage:\n/analyze btc"
-        )
-        return
-
-    coin = context.args[0].upper()
-
-    if not coin.endswith("USDT"):
-        coin += "USDT"
-
-    if coin not in CANDLES or len(CANDLES[coin]) < 50:
-        await update.message.reply_text(
-            f"{coin} data not ready yet."
-        )
-        return
-
-    result = analyze_symbol(coin)
-
-    if not result:
-        await update.message.reply_text(
-            f"{coin} currently no high probability setup found."
-        )
-        return
-
-    await update.message.reply_text(
-        format_alert(result)
-    )
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_text = "ON ✅" if ALERTS_ON else "OFF 🛑"
 
@@ -449,6 +408,41 @@ async def symbols(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Your chat id: {update.effective_chat.id}")
 
+async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) == 0:
+        await update.message.reply_text("Usage:\n/analyze btc")
+        return
+
+    coin = context.args[0].upper()
+
+    if not coin.endswith("USDT"):
+        coin += "USDT"
+
+    if coin not in CANDLES:
+        await update.message.reply_text(
+            f"{coin} watchlist me nahi hai.\nAvailable: {', '.join(SYMBOLS)}"
+        )
+        return
+
+    if len(CANDLES[coin]) < 80:
+        await update.message.reply_text(
+            f"{coin} ka live data abhi collect ho raha hai.\n"
+            f"1m candles collected: {len(CANDLES[coin])}/80\n"
+            f"Thoda wait karo."
+        )
+        return
+
+    result = analyze_symbol(coin)
+
+    if not result:
+        await update.message.reply_text(
+            f"{coin} currently no high-probability candlestick setup found.\n"
+            f"Bot ne live collected candles scan kiye, lekin filter pass nahi hua."
+        )
+        return
+
+    await update.message.reply_text(format_alert(result))
+
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
@@ -458,6 +452,7 @@ app.add_handler(CommandHandler("stopalerts", stopalerts))
 app.add_handler(CommandHandler("symbols", symbols))
 app.add_handler(CommandHandler("myid", myid))
 app.add_handler(CommandHandler("analyze", analyze))
+
 async def run_bot():
     await app.initialize()
     await app.start()
