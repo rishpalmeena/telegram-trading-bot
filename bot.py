@@ -13,7 +13,13 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-WATCHLIST = ["BTC", "ETH", "SOL", "XRP", "BNB"]
+WATCHLIST = [
+    "BTC","ETH","BNB","SOL","XRP","ADA","DOGE","AVAX",
+    "LINK","MATIC","DOT","TRX","TON","LTC","SHIB",
+    "PEPE","ARB","OP","APT","SUI","NEAR","ATOM",
+    "HBAR","FIL","INJ","RNDR","TAO","ICP","SEI",
+    "TIA","UNI","AAVE","RUNE","FTM","KAS","STX"
+]
 ALERTS_ON = True
 LAST_ALERT = {}
 
