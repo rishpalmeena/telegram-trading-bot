@@ -1,53 +1,227 @@
 import os
+import time
 import requests
-from flask import Flask, request
+import pandas as pd
+from threading import Thread
+from flask import Flask
+from ta.momentum import RSIIndicator
+from ta.trend import EMAIndicator
+from ta.volatility import AverageTrueRange
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-app = Flask(__name__)
+WATCHLIST = ["BTC", "ETH", "SOL", "XRP", "BNB"]
+ALERTS_ON = True
+LAST_ALERT = {}
+
+web_app = Flask(__name__)
+
+@web_app.route("/")
+def home():
+    return "Auto scanner bot is running"
+
+def run_web():
+    port = int(os.environ.get("PORT", 10000))
+    web_app.run(host="0.0.0.0", port=port)
+
+def get_data(symbol):
+    url = "https://www.okx.com/api/v5/market/candles"
+    params = {
+        "instId": symbol.upper() + "-USDT",
+        "bar": "15m",
+        "limit": "100"
+    }
+
+    response = requests.get(url, params=params, timeout=10)
+    data = response.json()
+
+    if "data" not in data or not data["data"]:
+        raise Exception("No data received")
+
+    candles = data["data"]
+    candles.reverse()
+
+    df = pd.DataFrame(candles, columns=[
+        "time", "open", "high", "low", "close",
+        "volume", "volCcy", "volCcyQuote", "confirm"
+    ])
+
+    df["open"] = df["open"].astype(float)
+    df["high"] = df["high"].astype(float)
+    df["low"] = df["low"].astype(float)
+    df["close"] = df["close"].astype(float)
+
+    return df
+
+def analyze_coin(coin):
+    df = get_data(coin)
+
+    close = df["close"]
+    high = df["high"]
+    low = df["low"]
+
+    df["ema20"] = EMAIndicator(close, window=20).ema_indicator()
+    df["ema50"] = EMAIndicator(close, window=50).ema_indicator()
+    df["rsi"] = RSIIndicator(close, window=14).rsi()
+    df["atr"] = AverageTrueRange(high, low, close, window=14).average_true_range()
+
+    last = df.iloc[-1]
+
+    price = float(last["close"])
+    ema20 = float(last["ema20"])
+    ema50 = float(last["ema50"])
+    rsi = float(last["rsi"])
+    atr = float(last["atr"])
+
+    if ema20 > ema50 and rsi > 55:
+        signal = "BUY 🟢"
+        entry = price
+        sl = price - (atr * 1.5)
+        t1 = price + (atr * 2)
+        t2 = price + (atr * 3)
+
+    elif ema20 < ema50 and rsi < 45:
+        signal = "SELL 🔴"
+        entry = price
+        sl = price + (atr * 1.5)
+        t1 = price - (atr * 2)
+        t2 = price - (atr * 3)
+
+    else:
+        return None
+
+    return {
+        "coin": coin.upper(),
+        "signal": signal,
+        "entry": entry,
+        "sl": sl,
+        "t1": t1,
+        "t2": t2,
+        "rsi": rsi,
+        "price": price
+    }
+
+def format_alert(result):
+    return f"""
+🚨 Auto Trading Alert
+
+Coin: {result['coin']}USDT
+Signal: {result['signal']}
+
+Entry: {result['entry']:.4f}
+Stop Loss: {result['sl']:.4f}
+
+Target 1: {result['t1']:.4f}
+Target 2: {result['t2']:.4f}
+
+RSI: {result['rsi']:.2f}
+
+⚠️ Risk:
+Har trade me sirf 1-2% capital risk karein.
+"""
 
 def send_telegram(message):
+    if not CHAT_ID:
+        return
+
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     data = {
         "chat_id": CHAT_ID,
         "text": message
     }
-    requests.post(url, data=data)
+    requests.post(url, data=data, timeout=10)
 
-@app.route("/")
-def home():
-    return "TradingView Telegram Bot is running"
+def scanner_loop():
+    global ALERTS_ON
 
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    data = request.json
+    while True:
+        try:
+            if ALERTS_ON:
+                for coin in WATCHLIST:
+                    try:
+                        result = analyze_coin(coin)
 
-    symbol = data.get("symbol", "Unknown")
-    signal = data.get("signal", "Signal")
-    entry = data.get("entry", "N/A")
-    sl = data.get("sl", "N/A")
-    target = data.get("target", "N/A")
-    timeframe = data.get("timeframe", "N/A")
+                        if result:
+                            key = result["coin"] + "_" + result["signal"]
 
-    message = f"""
-🚨 Trading Alert
+                            if LAST_ALERT.get(result["coin"]) != key:
+                                send_telegram(format_alert(result))
+                                LAST_ALERT[result["coin"]] = key
 
-Market: {symbol}
-Signal: {signal}
-Timeframe: {timeframe}
+                    except Exception as e:
+                        print(f"{coin} scan error:", e)
 
-Entry: {entry}
-Stop Loss: {sl}
-Target: {target}
+            time.sleep(900)
 
-⚠️ Risk: 1-2% capital only
-"""
+        except Exception as e:
+            print("Scanner error:", e)
+            time.sleep(60)
 
-    send_telegram(message)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Bot ready hai 🚀\n\n"
+        "Commands:\n"
+        "/analyze btc\n"
+        "/startalerts\n"
+        "/stopalerts\n"
+        "/status\n"
+        "/watchlist"
+    )
 
-    return {"status": "success"}
+async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Example:\n/analyze btc")
+        return
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    coin = context.args[0].upper()
+
+    try:
+        result = analyze_coin(coin)
+
+        if result:
+            await update.message.reply_text(format_alert(result))
+        else:
+            await update.message.reply_text(
+                f"⚠️ {coin} me abhi clear BUY/SELL signal nahi hai."
+            )
+
+    except Exception:
+        await update.message.reply_text(
+            "Error: Data nahi mil raha ya coin name galat hai.\nExample: /analyze btc"
+        )
+
+async def startalerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global ALERTS_ON
+    ALERTS_ON = True
+    await update.message.reply_text("✅ Auto alerts ON ho gaye.")
+
+async def stopalerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global ALERTS_ON
+    ALERTS_ON = False
+    await update.message.reply_text("🛑 Auto alerts OFF ho gaye.")
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    status_text = "ON ✅" if ALERTS_ON else "OFF 🛑"
+    await update.message.reply_text(f"Auto alerts: {status_text}")
+
+async def watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Watchlist coins:\n" + ", ".join(WATCHLIST)
+    )
+
+Thread(target=run_web).start()
+Thread(target=scanner_loop).start()
+
+app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("analyze", analyze))
+app.add_handler(CommandHandler("startalerts", startalerts))
+app.add_handler(CommandHandler("stopalerts", stopalerts))
+app.add_handler(CommandHandler("status", status))
+app.add_handler(CommandHandler("watchlist", watchlist))
+
+app.run_polling()
