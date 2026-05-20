@@ -169,12 +169,20 @@ def scanner_loop():
                         result = analyze_coin(coin)
 
                         if result:
-                            key = result["coin"] + "_" + result["signal"]
 
-                            if LAST_ALERT.get(result["coin"]) != key:
-                                send_telegram(format_alert(result))
-                                LAST_ALERT[result["coin"]] = key
+    key = result["coin"] + "_" + result["signal"]
 
+    if LAST_ALERT.get(result["coin"]) != key:
+
+        send_telegram(format_alert(result))
+
+        LAST_ALERT[result["coin"]] = key
+
+else:
+
+    send_telegram(
+        f"📊 {coin} Scan Complete\n\n❌ No clear signal right now."
+    )
                     except Exception as e:
                         print(f"{coin} scan error:", e)
 
