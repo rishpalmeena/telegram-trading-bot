@@ -1,493 +1,390 @@
 import os
+import json
 import time
-import requests
-import pandas as pd
-from threading import Thread
-from flask import Flask
+import asyncio
+import csv
+from collections import deque
 from datetime import datetime
+
+import pandas as pd
 import pytz
-
-from ta.momentum import RSIIndicator
-from ta.trend import EMAIndicator, MACD
-from ta.volatility import AverageTrueRange
-
+import websockets
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-SCAN_INTERVAL = 900
+SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+
+TIMEFRAME = "1m"
 COOLDOWN_SECONDS = 900
-MAX_AUTO_RISK_PERCENT = 1.5
-TOP_ALERT_LIMIT = 5
-MIN_CONFIDENCE = 70
-
-WATCHLIST = [
-    "BTC","ETH","BNB","SOL","XRP","ADA","DOGE","AVAX",
-    "LINK","DOT","TRX","TON","LTC","SHIB","PEPE",
-    "ARB","OP","APT","SUI","NEAR","ATOM","HBAR",
-    "FIL","INJ","ICP","SEI","TIA","UNI","AAVE",
-    "RUNE","STX","POL","RENDER","FET","GRT","LDO",
-    "ENS","SNX","CRV","CAKE","COMP","DYDX","JUP",
-    "ENA","W","STRK","ZRO","NOT","BONK","FLOKI"
-]
-
-SYMBOL_MAP = {
-    "MATIC": ["POL", "MATIC"],
-    "POL": ["POL", "MATIC"],
-    "RNDR": ["RENDER", "RNDR"],
-    "RENDER": ["RENDER", "RNDR"],
-    "FET": ["FET"],
-    "ASI": ["FET"]
-}
+MIN_CONFIDENCE = 75
+RISK_REWARD = 2.0
 
 ALERTS_ON = True
-LAST_ALERT_TIME = {}
 
-web_app = Flask(__name__)
+CANDLES = {s: deque(maxlen=250) for s in SYMBOLS}
+LAST_ALERT = {}
+OPEN_SIGNALS = {}
 
-@web_app.route("/")
-def home():
-    return "Advanced scanner bot is running"
+LOG_FILE = "signal_log.csv"
 
-def run_web():
-    port = int(os.environ.get("PORT", 10000))
-    web_app.run(host="0.0.0.0", port=port)
 
-def get_india_time():
-    india = pytz.timezone("Asia/Kolkata")
-    return datetime.now(india).strftime("%Y-%m-%d %H:%M:%S IST")
+def india_time():
+    tz = pytz.timezone("Asia/Kolkata")
+    return datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S IST")
 
-def possible_symbols(symbol):
-    return SYMBOL_MAP.get(symbol.upper(), [symbol.upper()])
 
-def get_binance_data(symbol, interval="15m"):
-    url = "https://api.binance.com/api/v3/klines"
+def ema(series, length):
+    return series.ewm(span=length, adjust=False).mean()
 
-    params = {
-        "symbol": symbol.upper() + "USDT",
-        "interval": interval,
-        "limit": 150
-    }
 
-    response = requests.get(url, params=params, timeout=15)
+def atr(df, length=14):
+    high_low = df["high"] - df["low"]
+    high_close = (df["high"] - df["close"].shift()).abs()
+    low_close = (df["low"] - df["close"].shift()).abs()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    return tr.rolling(length).mean()
 
-    if response.status_code != 200:
-        raise Exception(f"Binance API error: {response.status_code}")
 
-    data = response.json()
+def log_signal(row):
+    file_exists = os.path.exists(LOG_FILE)
 
-    if not isinstance(data, list):
-        raise Exception("Binance invalid data")
+    with open(LOG_FILE, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=row.keys())
 
-    df = pd.DataFrame(data, columns=[
-        "time","open","high","low","close","volume",
-        "close_time","qav","trades","tbbav","tbqav","ignore"
-    ])
+        if not file_exists:
+            writer.writeheader()
 
-    for col in ["open", "high", "low", "close", "volume"]:
-        df[col] = df[col].astype(float)
+        writer.writerow(row)
 
-    return df, "Binance", symbol.upper()
 
-def get_okx_data(symbol, interval="15m"):
-    okx_interval_map = {
-        "15m": "15m",
-        "1h": "1H"
-    }
+def analyze_symbol(symbol):
+    data = list(CANDLES[symbol])
 
-    url = "https://www.okx.com/api/v5/market/candles"
+    if len(data) < 70:
+        return None
 
-    params = {
-        "instId": symbol.upper() + "-USDT",
-        "bar": okx_interval_map.get(interval, interval),
-        "limit": "150"
-    }
+    df = pd.DataFrame(data)
 
-    response = requests.get(url, params=params, timeout=15)
+    df["ema20"] = ema(df["close"], 20)
+    df["ema50"] = ema(df["close"], 50)
+    df["atr"] = atr(df, 14)
+    df["vol_avg"] = df["volume"].rolling(20).mean()
 
-    if response.status_code != 200:
-        raise Exception(f"OKX API error: {response.status_code}")
-
-    data = response.json()
-
-    if "data" not in data or not data["data"]:
-        raise Exception("OKX empty data")
-
-    candles = data["data"]
-    candles.reverse()
-
-    df = pd.DataFrame(candles, columns=[
-        "time","open","high","low","close",
-        "volume","volCcy","volCcyQuote","confirm"
-    ])
-
-    for col in ["open", "high", "low", "close", "volume"]:
-        df[col] = df[col].astype(float)
-
-    return df, "OKX", symbol.upper()
-
-def get_data(symbol, interval="15m"):
-    for sym in possible_symbols(symbol):
-        try:
-            return get_binance_data(sym, interval)
-        except Exception as e1:
-            print(f"Binance failed {sym} {interval}: {e1}")
-
-            try:
-                return get_okx_data(sym, interval)
-            except Exception as e2:
-                print(f"OKX failed {sym} {interval}: {e2}")
-                continue
-
-    raise Exception("No live exchange data found")
-
-def add_indicators(df):
-    close = df["close"]
-    high = df["high"]
-    low = df["low"]
-    volume = df["volume"]
-
-    df["ema20"] = EMAIndicator(close, window=20).ema_indicator()
-    df["ema50"] = EMAIndicator(close, window=50).ema_indicator()
-    df["rsi"] = RSIIndicator(close, window=14).rsi()
-
-    macd = MACD(close)
-    df["macd"] = macd.macd()
-    df["macd_signal"] = macd.macd_signal()
-    df["macd_hist"] = macd.macd_diff()
-
-    df["atr"] = AverageTrueRange(
-        high,
-        low,
-        close,
-        window=14
-    ).average_true_range()
-
-    df["volume_avg"] = volume.rolling(20).mean()
-
-    return df
-
-def analyze_coin(coin):
-    scan_time = get_india_time()
-
-    df15, source, used_symbol = get_data(coin, "15m")
-    df1h, _, _ = get_data(coin, "1h")
-
-    df15 = add_indicators(df15)
-    df1h = add_indicators(df1h)
-
-    last = df15.iloc[-1]
-    htf = df1h.iloc[-1]
+    last = df.iloc[-1]
+    prev_zone = df.iloc[-31:-2]
 
     price = float(last["close"])
-    ema20 = float(last["ema20"])
-    ema50 = float(last["ema50"])
-    rsi = float(last["rsi"])
-    atr = float(last["atr"])
+    high = float(last["high"])
+    low = float(last["low"])
+    open_price = float(last["open"])
     volume = float(last["volume"])
-    volume_avg = float(last["volume_avg"])
-    macd_hist = float(last["macd_hist"])
+    vol_avg = float(last["vol_avg"])
+    atr_val = float(last["atr"])
 
-    htf_ema20 = float(htf["ema20"])
-    htf_ema50 = float(htf["ema50"])
+    if pd.isna(atr_val) or pd.isna(vol_avg):
+        return None
+
+    swing_high = float(prev_zone["high"].max())
+    swing_low = float(prev_zone["low"].min())
+
+    body = abs(price - open_price)
+    candle_range = max(high - low, 0.00000001)
+    body_ratio = body / candle_range
+
+    close_position = (price - low) / candle_range
+
+    trend_buy = last["ema20"] > last["ema50"]
+    trend_sell = last["ema20"] < last["ema50"]
+
+    volume_spike = volume > vol_avg * 1.4
 
     confidence = 0
     reasons = []
 
-    buy_trend = ema20 > ema50
-    sell_trend = ema20 < ema50
+    signal = None
+    entry = price
+    sl = None
+    target = None
 
-    buy_htf = htf_ema20 > htf_ema50
-    sell_htf = htf_ema20 < htf_ema50
+    # BUY breakout
+    if price > swing_high and trend_buy:
+        confidence += 30
+        reasons.append("Breakout above resistance")
 
-    buy_rsi = 55 <= rsi <= 72
-    sell_rsi = 28 <= rsi <= 45
+        if volume_spike:
+            confidence += 25
+            reasons.append("Volume spike confirmed")
 
-    buy_macd = macd_hist > 0
-    sell_macd = macd_hist < 0
+        if body_ratio > 0.45:
+            confidence += 15
+            reasons.append("Strong candle body")
 
-    volume_ok = volume > volume_avg
+        if close_position > 0.65:
+            confidence += 15
+            reasons.append("Close near candle high")
 
-    if buy_trend:
-        confidence += 20
-        reasons.append("15m trend bullish")
+        if atr_val / price < 0.025:
+            confidence += 15
+            reasons.append("Controlled volatility")
 
-    if sell_trend:
-        confidence += 20
-        reasons.append("15m trend bearish")
+        if confidence >= MIN_CONFIDENCE:
+            signal = "BUY 🟢"
+            sl = min(swing_high, price - atr_val * 1.2)
+            risk = price - sl
+            target = price + risk * RISK_REWARD
 
-    if buy_htf:
-        confidence += 25
-        reasons.append("1h trend bullish")
+    # SELL breakdown
+    elif price < swing_low and trend_sell:
+        confidence += 30
+        reasons.append("Breakdown below support")
 
-    if sell_htf:
-        confidence += 25
-        reasons.append("1h trend bearish")
+        if volume_spike:
+            confidence += 25
+            reasons.append("Volume spike confirmed")
 
-    if buy_rsi or sell_rsi:
-        confidence += 20
-        reasons.append("RSI momentum valid")
+        if body_ratio > 0.45:
+            confidence += 15
+            reasons.append("Strong candle body")
 
-    if buy_macd or sell_macd:
-        confidence += 20
-        reasons.append("MACD confirmation")
+        if close_position < 0.35:
+            confidence += 15
+            reasons.append("Close near candle low")
 
-    if volume_ok:
-        confidence += 15
-        reasons.append("Volume above average")
+        if atr_val / price < 0.025:
+            confidence += 15
+            reasons.append("Controlled volatility")
 
-    if buy_trend and buy_htf and buy_rsi and buy_macd and volume_ok:
-        signal = "BUY 🟢"
-        entry = price
-        sl = price - (atr * 1.5)
-        t1 = price + (atr * 2)
-        t2 = price + (atr * 3)
+        if confidence >= MIN_CONFIDENCE:
+            signal = "SELL 🔴"
+            sl = max(swing_low, price + atr_val * 1.2)
+            risk = sl - price
+            target = price - risk * RISK_REWARD
 
-    elif sell_trend and sell_htf and sell_rsi and sell_macd and volume_ok:
-        signal = "SELL 🔴"
-        entry = price
-        sl = price + (atr * 1.5)
-        t1 = price - (atr * 2)
-        t2 = price - (atr * 3)
+    if not signal:
+        return None
 
-    else:
-        return {
-            "coin": coin.upper(),
-            "used_symbol": used_symbol,
-            "source": source,
-            "scan_time": scan_time,
-            "signal": "NO TRADE",
-            "current_price": price,
-            "rsi": rsi,
-            "confidence": confidence,
-            "reason": "Advanced filters match nahi hue.",
-            "checks": ", ".join(reasons) if reasons else "No strong confirmation"
-        }
+    risk_percent = abs((entry - sl) / entry) * 100
 
-    risk_percent = abs(((entry - sl) / entry) * 100)
-
-    if risk_percent <= 1.5:
-        risk_level = "Low Risk ✅"
-    elif risk_percent <= 3:
-        risk_level = "Medium Risk ⚠️"
-    else:
-        risk_level = "High Risk 🔴"
+    if risk_percent > 1.5:
+        return None
 
     return {
-        "coin": coin.upper(),
-        "used_symbol": used_symbol,
-        "source": source,
-        "scan_time": scan_time,
+        "symbol": symbol,
         "signal": signal,
-        "current_price": price,
+        "time": india_time(),
+        "current_price": entry,
         "entry": entry,
         "sl": sl,
-        "t1": t1,
-        "t2": t2,
-        "rsi": rsi,
+        "target": target,
         "risk_percent": risk_percent,
-        "risk_level": risk_level,
         "confidence": confidence,
-        "checks": ", ".join(reasons)
+        "reasons": ", ".join(reasons)
     }
 
-def format_signal_alert(result):
+
+def format_alert(result):
     return f"""
-🚨 Advanced Fresh Trading Signal
+🚨 Real-Time WebSocket Signal
 
-Scan Time: {result['scan_time']}
-
-Coin: {result['coin']}USDT
-Data Source: {result['source']}
-Used Symbol: {result['used_symbol']}USDT
+Time: {result['time']}
+Coin: {result['symbol']}
 
 Signal: {result['signal']}
-Confidence Score: {result['confidence']}%
+Confidence: {result['confidence']}%
 
 Current Price: {result['current_price']:.8f}
-
 Entry: {result['entry']:.8f}
+
 Stop Loss: {result['sl']:.8f}
-
-Target 1: {result['t1']:.8f}
-Target 2: {result['t2']:.8f}
-
-RSI: {result['rsi']:.2f}
+Target: {result['target']:.8f}
 
 Risk: {result['risk_percent']:.2f}%
-Risk Level: {result['risk_level']}
 
 Confirmations:
-{result['checks']}
+{result['reasons']}
 
 Note:
-Ye fresh live scan ke baad signal hai.
-99% guarantee possible nahi hoti, lekin advanced filters fake signals kam karte hain.
+Ye signal live candle close hone ke baad generate hua hai.
+Guarantee nahi hoti. Paper/demo testing zaroor karein.
 """
 
-def format_no_trade(result):
-    return f"""
-📊 Advanced Fresh Analysis
 
-Scan Time: {result['scan_time']}
-
-Coin: {result['coin']}USDT
-Data Source: {result['source']}
-Used Symbol: {result['used_symbol']}USDT
-
-Current Price: {result['current_price']:.8f}
-RSI: {result['rsi']:.2f}
-Confidence Score: {result['confidence']}%
-
-Signal: NO TRADE ❌
-Reason: {result['reason']}
-
-Checks:
-{result['checks']}
-
-Note:
-Ye result fresh live scan ke baad hai.
-"""
-
-def send_telegram(message):
-    if not CHAT_ID:
-        print("CHAT_ID missing")
+def check_open_signal(symbol, candle, app):
+    if symbol not in OPEN_SIGNALS:
         return
 
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    sig = OPEN_SIGNALS[symbol]
 
-    data = {
-        "chat_id": CHAT_ID,
-        "text": message
-    }
+    high = candle["high"]
+    low = candle["low"]
 
-    requests.post(url, data=data, timeout=10)
+    result = None
 
-def scanner_loop():
-    global ALERTS_ON
+    if sig["side"] == "BUY":
+        if low <= sig["sl"]:
+            result = "SL HIT ❌"
+        elif high >= sig["target"]:
+            result = "TARGET HIT ✅"
+
+    if sig["side"] == "SELL":
+        if high >= sig["sl"]:
+            result = "SL HIT ❌"
+        elif low <= sig["target"]:
+            result = "TARGET HIT ✅"
+
+    if result:
+        msg = f"""
+📌 Signal Result
+
+Coin: {symbol}
+Result: {result}
+
+Entry: {sig['entry']:.8f}
+SL: {sig['sl']:.8f}
+Target: {sig['target']:.8f}
+
+Time: {india_time()}
+"""
+        asyncio.create_task(app.bot.send_message(chat_id=CHAT_ID, text=msg))
+        del OPEN_SIGNALS[symbol]
+
+
+async def websocket_loop(app):
+    streams = "/".join([f"{s.lower()}@kline_{TIMEFRAME}" for s in SYMBOLS])
+    url = f"wss://stream.binance.com:9443/stream?streams={streams}"
 
     while True:
         try:
-            if ALERTS_ON:
-                now = time.time()
-                valid_signals = []
+            async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
+                print("WebSocket connected")
 
-                for coin in WATCHLIST:
-                    try:
-                        result = analyze_coin(coin)
+                async for message in ws:
+                    payload = json.loads(message)
+                    k = payload["data"]["k"]
 
-                        if result["signal"] == "NO TRADE":
-                            print(f"{coin}: No trade after fresh scan")
-                            continue
+                    if not k["x"]:
+                        continue
 
-                        if result["risk_percent"] > MAX_AUTO_RISK_PERCENT:
-                            print(f"{coin}: Risk not low")
-                            continue
+                    symbol = k["s"]
 
-                        if result["confidence"] < MIN_CONFIDENCE:
-                            print(f"{coin}: Confidence low")
-                            continue
+                    candle = {
+                        "time": k["t"],
+                        "open": float(k["o"]),
+                        "high": float(k["h"]),
+                        "low": float(k["l"]),
+                        "close": float(k["c"]),
+                        "volume": float(k["v"])
+                    }
 
-                        last_time = LAST_ALERT_TIME.get(coin, 0)
+                    CANDLES[symbol].append(candle)
 
-                        if now - last_time < COOLDOWN_SECONDS:
-                            print(f"{coin}: Cooldown active")
-                            continue
+                    check_open_signal(symbol, candle, app)
 
-                        valid_signals.append(result)
+                    if not ALERTS_ON:
+                        continue
 
-                    except Exception as e:
-                        print(f"{coin} scan error:", e)
+                    result = analyze_symbol(symbol)
 
-                valid_signals = sorted(
-                    valid_signals,
-                    key=lambda x: (-x["confidence"], x["risk_percent"])
-                )
+                    if not result:
+                        continue
 
-                top_signals = valid_signals[:TOP_ALERT_LIMIT]
+                    now = time.time()
+                    last_time = LAST_ALERT.get(symbol, 0)
 
-                for signal in top_signals:
-                    send_telegram(format_signal_alert(signal))
-                    LAST_ALERT_TIME[signal["coin"]] = now
-                    print(f"Top advanced alert sent for {signal['coin']}")
+                    if now - last_time < COOLDOWN_SECONDS:
+                        continue
 
-            time.sleep(SCAN_INTERVAL)
+                    await app.bot.send_message(
+                        chat_id=CHAT_ID,
+                        text=format_alert(result)
+                    )
+
+                    side = "BUY" if "BUY" in result["signal"] else "SELL"
+
+                    OPEN_SIGNALS[symbol] = {
+                        "side": side,
+                        "entry": result["entry"],
+                        "sl": result["sl"],
+                        "target": result["target"]
+                    }
+
+                    LAST_ALERT[symbol] = now
+
+                    log_signal({
+                        "time": result["time"],
+                        "symbol": result["symbol"],
+                        "signal": result["signal"],
+                        "entry": result["entry"],
+                        "sl": result["sl"],
+                        "target": result["target"],
+                        "risk_percent": result["risk_percent"],
+                        "confidence": result["confidence"]
+                    })
 
         except Exception as e:
-            print("Scanner loop error:", e)
-            time.sleep(60)
+            print("WebSocket error:", e)
+            await asyncio.sleep(10)
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Bot ready hai 🚀\n\n"
+        "Realtime bot ready 🚀\n\n"
         "Commands:\n"
-        "/analyze btc\n"
+        "/status\n"
         "/startalerts\n"
         "/stopalerts\n"
-        "/status\n"
-        "/watchlist"
+        "/symbols\n"
+        "/myid"
     )
 
-async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Example:\n/analyze btc")
-        return
-
-    coin = context.args[0].upper()
-
-    try:
-        result = analyze_coin(coin)
-
-        if result["signal"] == "NO TRADE":
-            await update.message.reply_text(format_no_trade(result))
-        else:
-            await update.message.reply_text(format_signal_alert(result))
-
-    except Exception as e:
-        await update.message.reply_text(
-            f"❌ {coin} ka fresh data Binance/OKX dono par nahi mila."
-        )
-        print(f"Manual analyze error {coin}: {e}")
-
-async def startalerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global ALERTS_ON
-    ALERTS_ON = True
-    await update.message.reply_text("✅ Auto alerts ON ho gaye.")
-
-async def stopalerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global ALERTS_ON
-    ALERTS_ON = False
-    await update.message.reply_text("🛑 Auto alerts OFF ho gaye.")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_text = "ON ✅" if ALERTS_ON else "OFF 🛑"
 
     await update.message.reply_text(
-        f"Auto alerts: {status_text}\n"
-        f"Scan interval: 15 minutes\n"
-        f"Top alerts per scan: {TOP_ALERT_LIMIT}\n"
-        f"Low Risk only: max {MAX_AUTO_RISK_PERCENT}%\n"
-        f"Minimum confidence: {MIN_CONFIDENCE}%\n"
-        f"Timezone: Asia/Kolkata IST"
+        f"Alerts: {status_text}\n"
+        f"Symbols: {', '.join(SYMBOLS)}\n"
+        f"Timeframe: {TIMEFRAME}\n"
+        f"Min Confidence: {MIN_CONFIDENCE}%\n"
+        f"Cooldown: 15 minutes\n"
+        f"Timezone: IST"
     )
 
-async def watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Watchlist:\n\n" + ", ".join(WATCHLIST)
-    )
 
-Thread(target=run_web).start()
-Thread(target=scanner_loop).start()
+async def startalerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global ALERTS_ON
+    ALERTS_ON = True
+    await update.message.reply_text("✅ Alerts ON")
 
-app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+async def stopalerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global ALERTS_ON
+    ALERTS_ON = False
+    await update.message.reply_text("🛑 Alerts OFF")
+
+
+async def symbols(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Symbols:\n" + ", ".join(SYMBOLS))
+
+
+async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"Your chat id: {update.effective_chat.id}")
+
+
+async def post_init(app):
+    app.create_task(websocket_loop(app))
+
+
+app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
 
 app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("analyze", analyze))
+app.add_handler(CommandHandler("status", status))
 app.add_handler(CommandHandler("startalerts", startalerts))
 app.add_handler(CommandHandler("stopalerts", stopalerts))
-app.add_handler(CommandHandler("status", status))
-app.add_handler(CommandHandler("watchlist", watchlist))
+app.add_handler(CommandHandler("symbols", symbols))
+app.add_handler(CommandHandler("myid", myid))
 
 app.run_polling()
