@@ -21,7 +21,7 @@ SCAN_INTERVAL = 900
 COOLDOWN_SECONDS = 900
 MAX_AUTO_RISK_PERCENT = 1.5
 TOP_ALERT_LIMIT = 5
-MIN_CONFIDENCE = 90
+MIN_CONFIDENCE = 70
 
 WATCHLIST = [
     "BTC","ETH","BNB","SOL","XRP","ADA","DOGE","AVAX",
@@ -63,7 +63,6 @@ def possible_symbols(symbol):
     return SYMBOL_MAP.get(symbol.upper(), [symbol.upper()])
 
 def get_binance_data(symbol, interval="15m"):
-
     url = "https://api.binance.com/api/v3/klines"
 
     params = {
@@ -72,14 +71,10 @@ def get_binance_data(symbol, interval="15m"):
         "limit": 150
     }
 
-    response = requests.get(
-        url,
-        params=params,
-        timeout=15
-    )
+    response = requests.get(url, params=params, timeout=15)
 
     if response.status_code != 200:
-        raise Exception("Binance API error")
+        raise Exception(f"Binance API error: {response.status_code}")
 
     data = response.json()
 
@@ -91,15 +86,13 @@ def get_binance_data(symbol, interval="15m"):
         "close_time","qav","trades","tbbav","tbqav","ignore"
     ])
 
-    for col in ["open","high","low","close","volume"]:
+    for col in ["open", "high", "low", "close", "volume"]:
         df[col] = df[col].astype(float)
 
     return df, "Binance", symbol.upper()
 
-
 def get_okx_data(symbol, interval="15m"):
-
-    okx_map = {
+    okx_interval_map = {
         "15m": "15m",
         "1h": "1H"
     }
@@ -108,89 +101,20 @@ def get_okx_data(symbol, interval="15m"):
 
     params = {
         "instId": symbol.upper() + "-USDT",
-        "bar": okx_map.get(interval, "15m"),
+        "bar": okx_interval_map.get(interval, interval),
         "limit": "150"
     }
 
-    response = requests.get(
-        url,
-        params=params,
-        timeout=15
-    )
+    response = requests.get(url, params=params, timeout=15)
 
     if response.status_code != 200:
-        raise Exception("OKX API error")
+        raise Exception(f"OKX API error: {response.status_code}")
 
     data = response.json()
 
-    if "data" not in data:
-        raise Exception("OKX invalid data")
-
-    candles = data["data"]
-
-    if not candles:
+    if "data" not in data or not data["data"]:
         raise Exception("OKX empty data")
 
-    candles.reverse()
-
-    df = pd.DataFrame(candles, columns=[
-        "time","open","high","low","close",
-        "volume","volCcy","volCcyQuote","confirm"
-    ])
-
-    for col in ["open","high","low","close","volume"]:
-        df[col] = df[col].astype(float)
-
-    return df, "OKX", symbol.upper()
-
-
-def get_data(symbol, interval="15m"):
-
-    for sym in possible_symbols(symbol):
-
-        try:
-            return get_binance_data(sym, interval)
-
-        except Exception as e1:
-
-            print(f"Binance failed {sym}: {e1}")
-
-            try:
-                return get_okx_data(sym, interval)
-
-            except Exception as e2:
-
-                print(f"OKX failed {sym}: {e2}")
-
-                continue
-
-    raise Exception("No live exchange data found")
-
-    df = pd.DataFrame(data, columns=[
-        "time","open","high","low","close","volume",
-        "close_time","qav","trades","tbbav","tbqav","ignore"
-    ])
-
-    for col in ["open", "high", "low", "close", "volume"]:
-        df[col] = df[col].astype(float)
-
-    return df, "Binance", symbol.upper()
-
-def get_okx_data(symbol, interval="15m"):
-    okx_interval = interval
-
-    url = "https://www.okx.com/api/v5/market/candles"
-    params = {
-        "instId": symbol.upper() + "-USDT",
-        "bar": okx_interval,
-        "limit": "150"
-    }
-
-    data = requests.get(url, params=params, timeout=10).json()
-
-    if "data" not in data or not data["data"]:
-        raise Exception("OKX data not found")
-
     candles = data["data"]
     candles.reverse()
 
@@ -208,10 +132,13 @@ def get_data(symbol, interval="15m"):
     for sym in possible_symbols(symbol):
         try:
             return get_binance_data(sym, interval)
-        except Exception:
+        except Exception as e1:
+            print(f"Binance failed {sym} {interval}: {e1}")
+
             try:
                 return get_okx_data(sym, interval)
-            except Exception:
+            except Exception as e2:
+                print(f"OKX failed {sym} {interval}: {e2}")
                 continue
 
     raise Exception("No live exchange data found")
@@ -224,8 +151,6 @@ def add_indicators(df):
 
     df["ema20"] = EMAIndicator(close, window=20).ema_indicator()
     df["ema50"] = EMAIndicator(close, window=50).ema_indicator()
-    df["ema200"] = EMAIndicator(close, window=200 if len(df) >= 200 else 100).ema_indicator()
-
     df["rsi"] = RSIIndicator(close, window=14).rsi()
 
     macd = MACD(close)
@@ -233,7 +158,13 @@ def add_indicators(df):
     df["macd_signal"] = macd.macd_signal()
     df["macd_hist"] = macd.macd_diff()
 
-    df["atr"] = AverageTrueRange(high, low, close, window=14).average_true_range()
+    df["atr"] = AverageTrueRange(
+        high,
+        low,
+        close,
+        window=14
+    ).average_true_range()
+
     df["volume_avg"] = volume.rolling(20).mean()
 
     return df
@@ -248,7 +179,6 @@ def analyze_coin(coin):
     df1h = add_indicators(df1h)
 
     last = df15.iloc[-1]
-    prev = df15.iloc[-2]
     htf = df1h.iloc[-1]
 
     price = float(last["close"])
@@ -283,6 +213,7 @@ def analyze_coin(coin):
     if buy_trend:
         confidence += 20
         reasons.append("15m trend bullish")
+
     if sell_trend:
         confidence += 20
         reasons.append("15m trend bearish")
@@ -290,6 +221,7 @@ def analyze_coin(coin):
     if buy_htf:
         confidence += 25
         reasons.append("1h trend bullish")
+
     if sell_htf:
         confidence += 25
         reasons.append("1h trend bearish")
@@ -392,7 +324,7 @@ Confirmations:
 
 Note:
 Ye fresh live scan ke baad signal hai.
-🙏Trad Your Risk, lekin advanced filters fake signals kam karte hain.
+99% guarantee possible nahi hoti, lekin advanced filters fake signals kam karte hain.
 """
 
 def format_no_trade(result):
@@ -513,10 +445,11 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text(format_signal_alert(result))
 
-    except Exception:
+    except Exception as e:
         await update.message.reply_text(
             f"❌ {coin} ka fresh data Binance/OKX dono par nahi mila."
         )
+        print(f"Manual analyze error {coin}: {e}")
 
 async def startalerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global ALERTS_ON
