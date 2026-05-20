@@ -387,4 +387,5 @@ app.add_handler(CommandHandler("stopalerts", stopalerts))
 app.add_handler(CommandHandler("symbols", symbols))
 app.add_handler(CommandHandler("myid", myid))
 
-app.run_polling()
+if __name__ == "__main__":
+    app.run_polling(close_loop=False)
